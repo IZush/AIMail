@@ -23,7 +23,7 @@ app.MapGet("/", () => Results.Redirect("/health"));
 app.MapHealthChecks("/health");
 app.MapGet("/ready", () => Results.Ok(new { status = "ready" }));
 
-// API version v1 group (תתחיל מכאן)
+// API version v1 group (תתחיל מכאן) 
 var v1 = app.MapGroup("/api/v1");
 
 // דוגמת endpoint
