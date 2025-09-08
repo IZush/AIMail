@@ -19,8 +19,8 @@ if (app.Environment.IsDevelopment())
 }
 
 // Health endpoints
-app.MapGet("/", () => Results.Redirect("/health"));
-app.MapHealthChecks("/health");
+app.MapGet("/", () => Results.Redirect("/healthy"));
+app.MapHealthChecks("/healthy");
 app.MapGet("/ready", () => Results.Ok(new { status = "ready" }));
 
 // API version v1 group (תתחיל מכאן) 
