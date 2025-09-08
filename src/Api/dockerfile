@@ -4,9 +4,14 @@ EXPOSE 8080
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
+
+# context is ./src/Api, so the csproj is just Api.csproj
+COPY Api.csproj ./
+RUN dotnet restore Api.csproj
+
+# copy the rest of the project
 COPY . .
-RUN dotnet restore src/Api/Api.csproj
-RUN dotnet publish src/Api/Api.csproj -c Release -o /app/publish
+RUN dotnet publish Api.csproj -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app

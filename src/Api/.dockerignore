@@ -1,0 +1,11 @@
+**/bin
+**/obj
+.git
+.github
+.gitignore
+Dockerfile
+docker-compose*.yml
+*.user
+*.suo
+*.swp
+*.DS_Store
