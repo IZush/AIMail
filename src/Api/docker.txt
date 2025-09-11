@@ -1,0 +1,13 @@
+docker pull ghcr.io/izush/aimail:latest
+docker stop ai-mail-api || true
+docker rm ai-mail-api || true
+docker run -d --name ai-mail-api -p 8080:8080 ghcr.io/izush/aimail:latest
+
+
+
+הצעדים הבאים שלך יכולים להיות:
+להקים שלד פרויקט – Web API ב־.NET 8, פרויקט React/Next.js (אם תרצה UI).
+לבנות חיבור OAuth בסיסי מול Gmail – להתחיל מ־gmail.readonly ולוודא שאתה מקבל refresh token ושומר אותו זמנית.
+להריץ קריאה ראשונה ל־messages.list / messages.get – לוודא שאתה מצליח לראות אימיילים.
+להוסיף קריאה ל־OpenAI API – לשלוח טקסט גולמי של מייל ולקבל סיכום.
+להחליט איפה שומרים (או לא שומרים) – בהתחלה אפילו רק בזיכרון, ובהמשך DB עם הצפנה.
