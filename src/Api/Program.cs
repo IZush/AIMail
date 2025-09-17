@@ -4,6 +4,12 @@ using Google.Apis.Gmail.v1.Data;
 using Google.Apis.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Linq;
+using Api.Models;          // for OAuthTokenResponse & OpenAI* DTOs
+using System.Net.Http.Json;
+
 
 // === Config helpers ===
 string? GetEnv(string key, string? fallback = null) =>
@@ -21,18 +27,21 @@ var app = builder.Build();
 app.MapGet("/healthy", () => Results.Ok(new { ok = true }));
 
 // === 2.1 Start OAuth (Redirect to Google) ===
-app.MapGet("/auth/google/start", () =>
+app.MapGet("/auth/google/start", (HttpContext ctx) =>
 {
-    var clientId = GetEnv("GOOGLE_CLIENT_ID") ?? "";
-    var redirectUri = GetEnv("GOOGLE_REDIRECT_URI") ?? "http://localhost:5173/auth/google/callback";
+    var clientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID") ?? "";
+    var origin = $"{ctx.Request.Scheme}://{ctx.Request.Host}";
+    var redirectUri = $"{origin}/auth/google/callback";
 
-    var scopes = new[]
-    {
-        GmailService.Scope.GmailReadonly, // מינימום ל-MVP
-        "openid", "email", "profile", "offline_access"
-    };
+    var scopes = new[] { GmailService.Scope.GmailReadonly, "openid", "email", "profile" };
 
-    var url = CreateGoogleAuthUrl(clientId, redirectUri, scopes);
+    var url = "https://accounts.google.com/o/oauth2/v2/auth"
+        + "?response_type=code"
+        + $"&client_id={Uri.EscapeDataString(clientId)}"
+        + $"&redirect_uri={Uri.EscapeDataString(redirectUri)}"
+        + $"&scope={Uri.EscapeDataString(string.Join(" ", scopes))}"
+        + "&access_type=offline&prompt=consent";
+
     return Results.Redirect(url);
 });
 
@@ -57,16 +66,16 @@ app.MapGet("/api/gmail/messages", async (TokenMemoryStore tokens) =>
     var refresh = await tokens.GetAsync("default");
     if (string.IsNullOrEmpty(refresh)) return Results.BadRequest("Not connected");
 
-    var clientId = GetEnv("GOOGLE_CLIENT_ID") ?? "";
-    var clientSecret = GetEnv("GOOGLE_CLIENT_SECRET") ?? "";
+    var clientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID") ?? "";
+    var clientSecret = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_SECRET") ?? "";
     var gmail = await CreateGmailServiceAsync(clientId, clientSecret, refresh);
 
-    var listReq = gmail.Users.Messages.List("me");
-    listReq.LabelIds = "INBOX";
-    listReq.MaxResults = 10;
+    var req = gmail.Users.Messages.List("me");
+    req.LabelIds = "INBOX";
+    req.MaxResults = 10;
 
-    var list = await listReq.ExecuteAsync();
-    var results = new List<object>();
+    var list = await req.ExecuteAsync();
+    var items = new List<object>();
 
     if (list.Messages != null)
     {
@@ -74,8 +83,7 @@ app.MapGet("/api/gmail/messages", async (TokenMemoryStore tokens) =>
         {
             var full = await gmail.Users.Messages.Get("me", m.Id).ExecuteAsync();
             var headers = full.Payload?.Headers?.ToDictionary(h => h.Name, h => h.Value) ?? new Dictionary<string, string>();
-            results.Add(new
-            {
+            items.Add(new {
                 id = m.Id,
                 threadId = m.ThreadId,
                 date = headers.GetValueOrDefault("Date"),
@@ -86,7 +94,7 @@ app.MapGet("/api/gmail/messages", async (TokenMemoryStore tokens) =>
         }
     }
 
-    return Results.Ok(results);
+    return Results.Ok(items);
 });
 
 // === 4) סיכום אימייל עם OpenAI (TL;DR) ===
@@ -95,44 +103,37 @@ app.MapPost("/api/gmail/summarize/{messageId}", async (string messageId, TokenMe
     var refresh = await tokens.GetAsync("default");
     if (string.IsNullOrEmpty(refresh)) return Results.BadRequest("Not connected");
 
-    var clientId = GetEnv("GOOGLE_CLIENT_ID") ?? "";
-    var clientSecret = GetEnv("GOOGLE_CLIENT_SECRET") ?? "";
+    var clientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID") ?? "";
+    var clientSecret = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_SECRET") ?? "";
     var gmail = await CreateGmailServiceAsync(clientId, clientSecret, refresh);
 
     var msg = await gmail.Users.Messages.Get("me", messageId).ExecuteAsync();
     var bodyText = ExtractPlainText(msg) ?? msg.Snippet ?? "";
+    if (string.IsNullOrWhiteSpace(bodyText)) return Results.BadRequest("No text to summarize");
 
-    if (string.IsNullOrWhiteSpace(bodyText))
-        return Results.BadRequest("No text to summarize");
-
-    var openAiKey = GetEnv("OPENAI_API_KEY") ?? "";
-    var openAiBase = GetEnv("OPENAI_BASE_URL") ?? "https://api.openai.com/v1";
-    var openAiModel = GetEnv("OPENAI_MODEL") ?? "gpt-4o-mini";
+    var key  = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
+    var baseUrl = Environment.GetEnvironmentVariable("OPENAI_BASE_URL") ?? "https://api.openai.com/v1";
+    var model = Environment.GetEnvironmentVariable("OPENAI_MODEL") ?? "gpt-4o-mini";
 
     var http = httpFactory.CreateClient();
-    http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", openAiKey);
+    http.DefaultRequestHeaders.Authorization =
+        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
 
-    var payload = new
-    {
-        model = openAiModel,
-        messages = new[]
-        {
-            new { role = "system", content = "You summarize emails into short, actionable TL;DR with bullets, actions, and dates." },
+    var payload = new {
+        model,
+        messages = new[] {
+            new { role = "system", content = "Summarize emails into short, actionable TL;DR. Include bullets and actions." },
             new { role = "user", content = $"Summarize the following email:\n\n{bodyText}" }
         }
     };
 
-    var resp = await http.PostAsJsonAsync($"{openAiBase}/chat/completions", payload);
+    var resp = await http.PostAsJsonAsync($"{baseUrl}/chat/completions", payload);
     if (!resp.IsSuccessStatusCode)
-    {
-        var err = await resp.Content.ReadAsStringAsync();
-        return Results.Problem($"OpenAI error: {err}");
-    }
+        return Results.Problem($"OpenAI error: {await resp.Content.ReadAsStringAsync()}");
 
-    var json = await resp.Content.ReadFromJsonAsync<dynamic>();
-    string summary = json?["choices"]?[0]?["message"]?["content"]?.ToString() ?? "";
+    var chat = await resp.Content.ReadFromJsonAsync<OpenAIChatResponse>();
+    var summary = chat?.Choices.FirstOrDefault()?.Message?.Content ?? "";
 
-    // No-retention בשלב זה — לא שומרים גוף/סיכום
     return Results.Ok(new { messageId, summary });
 });
 
@@ -154,8 +155,8 @@ static string CreateGoogleAuthUrl(string clientId, string redirectUri, IEnumerab
     return url;
 }
 
-static async Task<(string AccessToken, string RefreshToken, DateTime ExpiresAt)> ExchangeCodeForToken(
-    string clientId, string clientSecret, string redirectUri, string code)
+static async Task<(string AccessToken, string RefreshToken, DateTime ExpiresAt)>
+    ExchangeCodeForToken(string clientId, string clientSecret, string redirectUri, string code)
 {
     using var http = new HttpClient();
     var content = new FormUrlEncodedContent(new Dictionary<string, string> {
@@ -165,16 +166,17 @@ static async Task<(string AccessToken, string RefreshToken, DateTime ExpiresAt)>
         ["redirect_uri"] = redirectUri,
         ["grant_type"] = "authorization_code"
     });
+
     var resp = await http.PostAsync("https://oauth2.googleapis.com/token", content);
     resp.EnsureSuccessStatusCode();
-    var json = await resp.Content.ReadFromJsonAsync<dynamic>();
-    string access = json?["access_token"]?.ToString() ?? "";
-    string refresh = json?["refresh_token"]?.ToString() ?? "";
-    int expiresIn = int.TryParse(json?["expires_in"]?.ToString() ?? "0", out int tmp) ? tmp : 0;
-    return (access, refresh, DateTime.UtcNow.AddSeconds(expiresIn));
+
+    var token = await resp.Content.ReadFromJsonAsync<OAuthTokenResponse>();
+    if (token is null) throw new Exception("Failed to parse token response");
+
+    return (token.AccessToken, token.RefreshToken ?? "", DateTime.UtcNow.AddSeconds(token.ExpiresIn));
 }
 
-static async Task<GmailService> CreateGmailServiceAsync(string clientId, string clientSecret, string refreshToken)
+static async Task<string> RefreshAccessToken(string clientId, string clientSecret, string refreshToken)
 {
     using var http = new HttpClient();
     var content = new FormUrlEncodedContent(new Dictionary<string, string> {
@@ -183,18 +185,24 @@ static async Task<GmailService> CreateGmailServiceAsync(string clientId, string 
         ["refresh_token"] = refreshToken,
         ["grant_type"] = "refresh_token"
     });
+
     var resp = await http.PostAsync("https://oauth2.googleapis.com/token", content);
     resp.EnsureSuccessStatusCode();
-    var json = await resp.Content.ReadFromJsonAsync<dynamic>();
-    string access = json?["access_token"]?.ToString() ?? "";
 
+    var token = await resp.Content.ReadFromJsonAsync<OAuthTokenResponse>();
+    return token?.AccessToken ?? "";
+}
+
+static async Task<GmailService> CreateGmailServiceAsync(string clientId, string clientSecret, string refreshToken)
+{
+    var access = await RefreshAccessToken(clientId, clientSecret, refreshToken);
     var cred = GoogleCredential.FromAccessToken(access);
-    return new GmailService(new BaseClientService.Initializer
-    {
+    return new GmailService(new BaseClientService.Initializer {
         HttpClientInitializer = cred,
         ApplicationName = "AI Mail Assistant MVP",
     });
 }
+
 
 static string? ExtractPlainText(Message msg)
 {
